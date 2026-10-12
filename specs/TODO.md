@@ -16,14 +16,14 @@
 - [x] Implement Docker Compose migrations/worker topology and verify real PostgreSQL 16 + Redis 7 startup.
 - [x] Add named test_R1_* through test_R16_* coverage, property/fuzz tests, integration tests against compose services, and clean mypy/ruff.
 - [x] Make loadgen ramp 10k buyers, retries/failures/duplicate webhooks; make invariant checker read PostgreSQL and assert exactly 1000 ticketed, no oversell, ledger equality, no leaked holds, drained outbox/DLQ.
-- [ ] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly.
-- [ ] Update README/runbook/specs/FINAL.md with verified scope and known limits; commit/push each milestone with required identity/signing/trailer rules.
+- [x] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly.
+- [x] Update README/runbook/specs/FINAL.md with verified scope and known limits; commit/push each milestone with required identity/signing/trailer rules.
 - [x] Add AWS Terraform under infra/terraform: bootstrap remote state, staging/prod VPC/ALB+ACM/ECS api-worker-dispatcher/ECR/RDS16 Multi-AZ prod/ElastiCache/Secrets/IAM/alarms/autoscaling/WAF/OIDC.
 - [x] Add multi-stage non-root Dockerfile healthcheck, ECS one-off migration task, infra README first deploy/rollback/destroy/cost ESTIMATE/unverified list.
 - [x] Add `make tf-check`, CI workflow, and run only fmt/init-backend=false/validate plus optional static security checks; never plan/apply or use AWS credentials.
 
 ## Open
-- [x] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly. Three normal runs passed invariants; the kill-9 attempt failed before a final loadgen record and is documented.
+- [x] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly. Latest normal and kill-9 runs passed invariants and server-side browse/hold p99; client-observed latency misses are documented.
 - [x] Complete production-grade crash recovery, tenant isolation, load shedding, priority handling, and the scripted PSP/DB/webhook/clock/DLQ chaos scenarios; remaining acceptance limitations are documented.
 
 ## Done
