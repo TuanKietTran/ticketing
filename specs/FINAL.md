@@ -10,8 +10,8 @@
 - Terraform `make tf-check` passed using only `fmt`, `init -backend=false`, and `validate`. No AWS credentials, plan, apply, or resources were used.
 
 ## Acceptance failures and limits
-- The required 10k acceptance did not pass. The historical 10k run produced 328 ticketed and 672 held; the bounded-pool run measured p99 70,745.98 ms and also produced 328 sold/672 held.
-- A smaller post-fix run (100 buyers/10 capacity) produced 10 ticketed, 0 held, and a PostgreSQL invariant snapshot, but does not substitute for 10k.
+- Earlier 10k runs failed with connection exhaustion/deadlocks and produced 328 ticketed/672 held; those failures remain recorded.
+- The latest corrected 10k run passed database invariants: 1,000 sold, 1,000 ticketed, 0 held, 0 leaked holds, 0 duplicate ticket sets, and 1,000 successful charges. Its end-to-end p99 was 56,195.87 ms, far above the brief's browse/hold targets.
 - Three normal 10k repeats and the fault-injection worker-kill run remain unverified.
 - Browse/hold-specific p99, error rate, PSP failure injection, full chaos scenarios, ticket-set/ledger acceptance at 1,000 seats, and production crash convergence remain unverified.
 - The code contains persistent adapters and controls, but full production-grade tenant isolation, worker orchestration, and all dependency failure paths still require hardening.

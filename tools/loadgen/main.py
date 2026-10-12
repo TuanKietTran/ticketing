@@ -70,7 +70,7 @@ async def buyer(
 
 async def run(base_url: str, buyers: int, capacity: int) -> dict[str, float | int | str]:
     event_id = uuid4()
-    gate = asyncio.Semaphore(200)
+    gate = asyncio.Semaphore(100)
     limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
     async with httpx.AsyncClient(timeout=30, limits=limits) as client:
         await request_with_retries(
