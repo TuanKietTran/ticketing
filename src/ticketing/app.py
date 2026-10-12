@@ -74,7 +74,7 @@ def create_app() -> FastAPI:
     webhook_events: set[str] = set()
     waiting_room = WaitingRoom()
     redis = make_redis()
-    hold_admission = asyncio.Semaphore(32)
+    hold_admission = asyncio.Semaphore(8)
 
     async def require_admin(x_api_key: str = Header(..., alias="X-API-Key")) -> UUID:
         async with sessions() as session:
@@ -192,7 +192,7 @@ def create_app() -> FastAPI:
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
     ) -> dict[str, object]:
         try:
-            await asyncio.wait_for(hold_admission.acquire(), timeout=0.01)
+            await asyncio.wait_for(hold_admission.acquire(), timeout=0.005)
         except TimeoutError as exc:
             raise HTTPException(
                 status_code=503,
