@@ -3,7 +3,7 @@
 ## Gap analysis (against specs/000-brief.md)
 - [x] Replace in-memory reference services with real async SQLAlchemy/PostgreSQL persistence and Redis integration.
 - [x] Add complete forward-only Alembic migrations for organizers, catalog, inventory, holds, orders, order_events, idempotency, charges, tickets, scans, webhooks, outbox, and dead_letters, including CHECK/unique constraints.
-- [ ] Implement guarded SQL inventory UPDATEs, hold TTL/reaper, reserved seats, general admission, and real 200-way PostgreSQL race tests on 10 seats.
+- [x] Implement guarded SQL inventory UPDATEs, hold TTL/reaper, reserved seats, general admission, and real 200-way PostgreSQL race tests on 10 seats.
 - [ ] Implement HTTP Idempotency-Key middleware with atomic claim, body mismatch 422, replayed status/body, expiry, concurrent duplicate waiting/409, and R1/R3 tests.
 - [ ] Implement complete order/payment persistence, PSP retry/timeout/failure modes, signed durable webhook endpoint, dedupe/out-of-order handling, reconciliation, and charge ledger.
 - [ ] Implement transactional outbox dispatcher with exponential full-jitter backoff, bounded retries, poison-message DLQ, DLQ metrics/alerts, admin list/inspect/replay bulk/discard endpoints, CLI, and R16 replay tests.
