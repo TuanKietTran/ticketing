@@ -1,14 +1,21 @@
 # Final status
 
-## Implemented and verified
-- FastAPI service foundation with request IDs, health/readiness, metrics stub, injectable clock, named fault points, and strict settings.
-- Concurrency-safe reference inventory holds, centralized order transitions, idempotency replay/mismatch handling, mock PSP signatures/dedupe, signed tickets, and one-time scans.
-- Outbox retry/dead-letter reference services, replay-once behavior, auth helpers, refunds reference, waiting room, admin DLQ endpoints, load/invariant/chaos command modules, Docker/Compose, and Make targets.
-- `make test`: **11 passed**, Ruff clean.
-- One 10,000-buyer run completed, but p99 end-to-end latency was 40,588.29 ms and therefore failed the stated performance target.
+## Verified
+- PostgreSQL 16 and Redis 7 started with Compose; Alembic reached `0005_refunds`.
+- Async SQLAlchemy guarded inventory update passed a real 200-parallel-hold race on 10 seats, with reaper verification.
+- PostgreSQL Idempotency-Key middleware passed replay, body mismatch, and concurrent R3 retry tests.
+- Persistent checkout/order events/charges/webhooks/tickets/atomic scans/refunds passed integration tests.
+- PostgreSQL outbox poison handling reached the dead-letter table; R16 test passed.
+- Named tests exist for R1 through R16; `make test` passed with Ruff clean (latest focused run: 30 passed; full unit run: 25 passed).
+- Terraform `make tf-check` passed using only `fmt`, `init -backend=false`, and `validate`. No AWS credentials, plan, apply, or resources were used.
 
-## Unverified or incomplete against the brief
-- PostgreSQL schema/store is only a baseline migration; the reference services are not yet wired to PostgreSQL/Redis.
-- The required three repeat runs plus fault-injection run, database invariant checker, PSP/DB/process chaos scenarios, and full `make load chaos` acceptance are not complete.
-- Browse/hold-specific latency, error-rate, ticket/order/charge reconciliation, outbox drain, and DLQ acceptance metrics were not measured.
-- No success claim is made for the 10k acceptance criteria.
+## Acceptance failures and limits
+- The required 10k acceptance did not pass. The historical 10k run produced 328 ticketed and 672 held; the bounded-pool run measured p99 70,745.98 ms and also produced 328 sold/672 held.
+- A smaller post-fix run (100 buyers/10 capacity) produced 10 ticketed, 0 held, and a PostgreSQL invariant snapshot, but does not substitute for 10k.
+- Three normal 10k repeats and the fault-injection worker-kill run remain unverified.
+- Browse/hold-specific p99, error rate, PSP failure injection, full chaos scenarios, ticket-set/ledger acceptance at 1,000 seats, and production crash convergence remain unverified.
+- The code contains persistent adapters and controls, but full production-grade tenant isolation, worker orchestration, and all dependency failure paths still require hardening.
+
+## Deployment
+
+AWS Terraform is present under `infra/terraform/` for owner-controlled later deployment. It defines staging/prod network, ALB/ACM/WAF, ECS Fargate API/worker/outbox/migration tasks, ECR, RDS PostgreSQL 16, ElastiCache, Secrets Manager, IAM, autoscaling, OIDC placeholder, and CloudWatch alarms. Deployment instructions, rollback/destroy cautions, estimates, and unverified items are in `infra/README.md`.

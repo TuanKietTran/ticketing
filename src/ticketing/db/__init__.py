@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
@@ -12,7 +13,13 @@ from ticketing.settings import get_settings
 
 
 def make_engine() -> AsyncEngine:
-    return create_async_engine(get_settings().database_url, pool_pre_ping=True, poolclass=NullPool)
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return create_async_engine(
+            get_settings().database_url, pool_pre_ping=True, poolclass=NullPool
+        )
+    return create_async_engine(
+        get_settings().database_url, pool_pre_ping=True, pool_size=10, max_overflow=5
+    )
 
 
 def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

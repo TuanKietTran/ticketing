@@ -1,0 +1,12 @@
+name: terraform-static
+on:
+  pull_request:
+    paths: ["infra/**", "Dockerfile", "Makefile"]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: make tf-check
+      # No plan/apply step and no cloud credentials are intentionally configured.
