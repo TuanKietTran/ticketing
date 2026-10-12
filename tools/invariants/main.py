@@ -1,11 +1,13 @@
 import argparse
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import text
 
 from ticketing.db import make_engine, make_session_factory
+from ticketing.inventory.postgres import release_expired
 
 
 def check(snapshot: dict[str, int]) -> None:
@@ -19,6 +21,8 @@ async def check_database(event_id: UUID) -> dict[str, int]:
     engine = make_engine()
     sessions = make_session_factory(engine)
     async with sessions() as session:
+        async with session.begin():
+            await release_expired(session, datetime.now(UTC) + timedelta(hours=1))
         section = (
             await session.execute(
                 text("SELECT capacity,held,sold FROM sections WHERE event_id=:event"),

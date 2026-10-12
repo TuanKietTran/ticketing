@@ -1,3 +1,5 @@
+import asyncio
+import random
 import time
 from datetime import timedelta
 from uuid import UUID, uuid4
@@ -6,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from ticketing.api.idempotency import IdempotencyMiddleware
 from ticketing.auth import authenticate_organizer, hash_api_key
@@ -123,28 +126,36 @@ def create_app() -> FastAPI:
         payload: HoldRequest,
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
     ) -> dict[str, object]:
-        async with sessions() as session:
-            async with session.begin():
-                section_id = event_sections.get(event_id)
-                if section_id is None:
-                    section_id = (
-                        await session.execute(
-                            text("SELECT id FROM sections WHERE event_id=:event LIMIT 1"),
-                            {"event": event_id},
+        section_id = event_sections.get(event_id)
+        expires_at = clock.now() + timedelta(minutes=10)
+        hold_id = None
+        for attempt in range(4):
+            try:
+                async with sessions() as session:
+                    async with session.begin():
+                        if section_id is None:
+                            section_id = (
+                                await session.execute(
+                                    text("SELECT id FROM sections WHERE event_id=:event LIMIT 1"),
+                                    {"event": event_id},
+                                )
+                            ).scalar_one_or_none()
+                        if section_id is None:
+                            raise HTTPException(status_code=404, detail="event not found")
+                        hold_id = await claim_general_admission(
+                            session,
+                            event_id,
+                            section_id,
+                            payload.buyer_id,
+                            idempotency_key,
+                            payload.quantity,
+                            expires_at,
                         )
-                    ).scalar_one_or_none()
-                if section_id is None:
-                    raise HTTPException(status_code=404, detail="event not found")
-                expires_at = clock.now() + timedelta(minutes=10)
-                hold_id = await claim_general_admission(
-                    session,
-                    event_id,
-                    section_id,
-                    payload.buyer_id,
-                    idempotency_key,
-                    payload.quantity,
-                    expires_at,
-                )
+                break
+            except DBAPIError as exc:
+                if attempt == 3:
+                    raise HTTPException(status_code=503, detail="inventory busy") from exc
+                await asyncio.sleep(random.uniform(0.01, 0.1) * (attempt + 1))
         if hold_id is None:
             raise HTTPException(status_code=409, detail="inventory unavailable")
         return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
