@@ -19,45 +19,38 @@ async def claim_general_admission(
     """Claim inventory with one guarded UPDATE inside the caller's transaction."""
     if quantity <= 0:
         raise ValueError("quantity must be positive")
-    existing = await session.scalar(
-        text("SELECT id FROM holds WHERE buyer_id = :buyer AND idempotency_key = :key"),
-        {"buyer": buyer_id, "key": idempotency_key},
-    )
-    if existing is not None:
-        return UUID(str(existing))
-    result = await session.execute(
-        update(Section)
-        .where(
-            Section.id == section_id,
-            Section.event_id == event_id,
-            Section.held + Section.sold + quantity <= Section.capacity,
-        )
-        .values(held=Section.held + quantity)
-    )
-    if result.rowcount != 1:
-        return None
     hold_id = uuid4()
-    await session.execute(
+    result = await session.execute(
         text(
-            "INSERT INTO holds(id,event_id,buyer_id,expires_at,status,idempotency_key) "
-            "VALUES (:hold,:event,:buyer,:expires,'active',:key)"
+            "WITH existing AS ("
+            "  SELECT id FROM holds WHERE buyer_id=:buyer AND idempotency_key=:key"
+            "), updated AS ("
+            "  UPDATE sections SET held=held+:quantity "
+            "  WHERE id=:section AND event_id=:event "
+            "    AND held+sold+:quantity <= capacity "
+            "    AND NOT EXISTS (SELECT 1 FROM existing) "
+            "  RETURNING id"
+            "), created_hold AS ("
+            "  INSERT INTO holds(id,event_id,buyer_id,expires_at,status,idempotency_key) "
+            "  SELECT :hold,:event,:buyer,:expires,'active',:key FROM updated "
+            "  RETURNING id"
+            "), created_item AS ("
+            "  INSERT INTO hold_items(hold_id,section_id,quantity,unit_amount_minor) "
+            "  SELECT id,:section,:quantity,0 FROM created_hold RETURNING hold_id"
+            ") SELECT id FROM existing UNION ALL SELECT id FROM created_hold"
         ),
         {
             "hold": hold_id,
             "event": event_id,
+            "section": section_id,
             "buyer": buyer_id,
             "expires": expires_at,
             "key": idempotency_key,
+            "quantity": quantity,
         },
     )
-    await session.execute(
-        text(
-            "INSERT INTO hold_items(hold_id, section_id, quantity, unit_amount_minor) "
-            "VALUES (:hold, :section, :quantity, 0)"
-        ),
-        {"hold": hold_id, "section": section_id, "quantity": quantity},
-    )
-    return hold_id
+    created = result.scalar_one_or_none()
+    return UUID(str(created)) if created is not None else None
 
 
 async def release_expired(session: AsyncSession, now: datetime) -> int:
