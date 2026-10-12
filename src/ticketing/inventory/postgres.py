@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ticketing.db.models import Hold, Section
+from ticketing.db.models import Section
 
 
 async def claim_general_admission(
@@ -37,15 +37,18 @@ async def claim_general_admission(
     if result.rowcount != 1:
         return None
     hold_id = uuid4()
-    session.add(
-        Hold(
-            id=hold_id,
-            event_id=event_id,
-            buyer_id=buyer_id,
-            expires_at=expires_at,
-            status="active",
-            idempotency_key=idempotency_key,
-        )
+    await session.execute(
+        text(
+            "INSERT INTO holds(id,event_id,buyer_id,expires_at,status,idempotency_key) "
+            "VALUES (:hold,:event,:buyer,:expires,'active',:key)"
+        ),
+        {
+            "hold": hold_id,
+            "event": event_id,
+            "buyer": buyer_id,
+            "expires": expires_at,
+            "key": idempotency_key,
+        },
     )
     await session.execute(
         text(

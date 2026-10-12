@@ -35,4 +35,4 @@ def test_hold_checkout_pay_flow_is_retry_safe() -> None:
     paid = client.post(
         f"/orders/{order_id}/pay", headers={"Idempotency-Key": f"pay-{buyer_id}"}
     )
-    assert paid.json()["state"] == "paid"
+    assert paid.json()["state"] == "ticketed"

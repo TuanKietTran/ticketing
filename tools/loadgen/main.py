@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from tools.invariants.main import check_database
+
 
 async def buyer(client: httpx.AsyncClient, base_url: str, event_id: UUID, buyer_id: UUID) -> float:
     started = time.perf_counter()
@@ -31,17 +33,24 @@ async def buyer(client: httpx.AsyncClient, base_url: str, event_id: UUID, buyer_
 async def run(base_url: str, buyers: int, capacity: int) -> dict[str, float | int]:
     event_id = uuid4()
     async with httpx.AsyncClient(base_url=base_url, timeout=10) as client:
-        await client.post(f"/admin/events/{event_id}/inventory", json={"capacity": capacity})
+        await client.post(
+            f"/admin/events/{event_id}/inventory",
+            headers={"Idempotency-Key": f"seed-{event_id}"},
+            json={"capacity": capacity},
+        )
         latencies = await asyncio.gather(
             *(buyer(client, base_url, event_id, uuid4()) for _ in range(buyers))
         )
     ordered = sorted(latencies)
+    invariants = await check_database(event_id)
     return {
+        "event_id": str(event_id),
         "buyers": buyers,
         "capacity": capacity,
         "completed": len(latencies),
         "p99_ms": ordered[max(0, int(len(ordered) * 0.99) - 1)],
         "mean_ms": statistics.mean(latencies),
+        **invariants,
     }
 
 

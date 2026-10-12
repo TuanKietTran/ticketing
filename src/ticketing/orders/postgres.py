@@ -19,7 +19,8 @@ async def checkout_hold(
         await session.execute(
             text(
                 "SELECT h.id,h.event_id,h.buyer_id,e.organizer_id,h.expires_at,h.status "
-                "FROM holds h JOIN events e ON e.id=h.event_id WHERE h.id=:id FOR UPDATE"
+                "FROM holds h JOIN events e ON e.id=h.event_id "
+                "WHERE h.id=:id FOR UPDATE OF h"
             ),
             {"id": hold_id},
         )

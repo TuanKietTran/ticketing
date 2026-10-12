@@ -17,8 +17,8 @@ from ticketing.deadletter import (
     replay_dead_letter,
 )
 from ticketing.inventory import Inventory, claim_general_admission
-from ticketing.obs import configure_logging, new_request_id, request_id
-from ticketing.orders import OrderState, checkout_hold, new_order
+from ticketing.obs import configure_logging, log, new_request_id, request_id
+from ticketing.orders import OrderState, checkout_hold, new_order, transition_order
 from ticketing.payments import MockPSP, receive_webhook, record_charge
 from ticketing.refunds import refund_order
 from ticketing.tickets import TicketService, issue_ticket_set, scan_ticket
@@ -59,8 +59,9 @@ def create_app() -> FastAPI:
             response = await call_next(request)
             response.headers["X-Request-ID"] = rid
             return response
-        except Exception:
+        except Exception as exc:
             metrics_state["errors"] += 1
+            log("request_error", error=str(exc), path=request.url.path)
             return JSONResponse(
                 status_code=500,
                 content={"code": "internal_error", "request_id": rid},
@@ -122,23 +123,31 @@ def create_app() -> FastAPI:
         payload: HoldRequest,
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
     ) -> dict[str, object]:
-        if event_id in event_sections:
-            expires_at = clock.now() + timedelta(minutes=10)
-            async with sessions() as session:
-                async with session.begin():
-                    hold_id = await claim_general_admission(
-                        session,
-                        event_id,
-                        event_sections[event_id],
-                        payload.buyer_id,
-                        idempotency_key,
-                        payload.quantity,
-                        expires_at,
-                    )
-            if hold_id is None:
-                raise HTTPException(status_code=409, detail="inventory unavailable")
-            return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
-        raise HTTPException(status_code=404, detail="event not found")
+        async with sessions() as session:
+            async with session.begin():
+                section_id = event_sections.get(event_id)
+                if section_id is None:
+                    section_id = (
+                        await session.execute(
+                            text("SELECT id FROM sections WHERE event_id=:event LIMIT 1"),
+                            {"event": event_id},
+                        )
+                    ).scalar_one_or_none()
+                if section_id is None:
+                    raise HTTPException(status_code=404, detail="event not found")
+                expires_at = clock.now() + timedelta(minutes=10)
+                hold_id = await claim_general_admission(
+                    session,
+                    event_id,
+                    section_id,
+                    payload.buyer_id,
+                    idempotency_key,
+                    payload.quantity,
+                    expires_at,
+                )
+        if hold_id is None:
+            raise HTTPException(status_code=409, detail="inventory unavailable")
+        return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
 
     @app.post("/holds/{hold_id}/checkout", status_code=201)
     async def checkout(
@@ -184,9 +193,10 @@ def create_app() -> FastAPI:
                 tickets = await issue_ticket_set(
                     session, order_id, 1, "development-only-change-me"
                 )
+                await transition_order(session, order_id, OrderState.TICKETED, "tickets issued")
         return {
             "order_id": str(order_id),
-            "state": OrderState.PAID,
+            "state": OrderState.TICKETED,
             "charge_id": charge.id,
             "tickets": len(tickets),
         }
