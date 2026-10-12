@@ -5,7 +5,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ticketing.api.idempotency import IdempotencyMiddleware
 from ticketing.clock import SystemClock
+from ticketing.db import make_engine, make_session_factory
 from ticketing.deadletter import DeadLetterQueue
 from ticketing.inventory import Inventory, SoldOut
 from ticketing.obs import configure_logging, new_request_id, request_id
@@ -19,6 +21,7 @@ from ticketing.waitingroom import WaitingRoom
 def create_app() -> FastAPI:
     configure_logging()
     app = FastAPI(title="ticketing", version="0.1.0")
+    app.add_middleware(IdempotencyMiddleware, sessions=make_session_factory(make_engine()))
     inventory = Inventory()
     idempotency = IdempotencyStore()
     psp = MockPSP()

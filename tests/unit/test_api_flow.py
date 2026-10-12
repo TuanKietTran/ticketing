@@ -8,7 +8,11 @@ from ticketing.app import create_app
 def test_hold_checkout_pay_flow_is_retry_safe() -> None:
     client = TestClient(create_app())
     event_id, buyer_id = uuid4(), uuid4()
-    seed = client.post(f"/admin/events/{event_id}/inventory", json={"capacity": 1})
+    seed = client.post(
+        f"/admin/events/{event_id}/inventory",
+        headers={"Idempotency-Key": "seed-1"},
+        json={"capacity": 1},
+    )
     assert seed.status_code == 200
     response = client.post(
         f"/events/{event_id}/holds",
