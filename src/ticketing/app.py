@@ -74,6 +74,7 @@ def create_app() -> FastAPI:
     webhook_events: set[str] = set()
     waiting_room = WaitingRoom()
     redis = make_redis()
+    hold_admission = asyncio.Semaphore(32)
 
     async def require_admin(x_api_key: str = Header(..., alias="X-API-Key")) -> UUID:
         async with sessions() as session:
@@ -190,39 +191,53 @@ def create_app() -> FastAPI:
         payload: HoldRequest,
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
     ) -> dict[str, object]:
-        section_id = event_sections.get(event_id)
-        expires_at = clock.now() + timedelta(minutes=10)
-        hold_id = None
-        for attempt in range(4):
-            try:
-                async with sessions() as session:
-                    async with session.begin():
-                        if section_id is None:
-                            section_id = (
-                                await session.execute(
-                                    text("SELECT id FROM sections WHERE event_id=:event LIMIT 1"),
-                                    {"event": event_id},
-                                )
-                            ).scalar_one_or_none()
-                        if section_id is None:
-                            raise HTTPException(status_code=404, detail="event not found")
-                        hold_id = await claim_general_admission(
-                            session,
-                            event_id,
-                            section_id,
-                            payload.buyer_id,
-                            idempotency_key,
-                            payload.quantity,
-                            expires_at,
-                        )
-                break
-            except DBAPIError as exc:
-                if attempt == 3:
-                    raise HTTPException(status_code=503, detail="inventory busy") from exc
-                await asyncio.sleep(random.uniform(0.01, 0.1) * (attempt + 1))
-        if hold_id is None:
-            raise HTTPException(status_code=409, detail="inventory unavailable")
-        return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
+        try:
+            await asyncio.wait_for(hold_admission.acquire(), timeout=0.01)
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="inventory admission busy",
+                headers={"Retry-After": "1"},
+            ) from exc
+        try:
+            section_id = event_sections.get(event_id)
+            expires_at = clock.now() + timedelta(minutes=10)
+            hold_id = None
+            for attempt in range(4):
+                try:
+                    async with sessions() as session:
+                        async with session.begin():
+                            if section_id is None:
+                                section_id = (
+                                    await session.execute(
+                                        text(
+                                            "SELECT id FROM sections "
+                                            "WHERE event_id=:event LIMIT 1"
+                                        ),
+                                        {"event": event_id},
+                                    )
+                                ).scalar_one_or_none()
+                            if section_id is None:
+                                raise HTTPException(status_code=404, detail="event not found")
+                            hold_id = await claim_general_admission(
+                                session,
+                                event_id,
+                                section_id,
+                                payload.buyer_id,
+                                idempotency_key,
+                                payload.quantity,
+                                expires_at,
+                            )
+                    break
+                except DBAPIError as exc:
+                    if attempt == 3:
+                        raise HTTPException(status_code=503, detail="inventory busy") from exc
+                    await asyncio.sleep(random.uniform(0.01, 0.1) * (attempt + 1))
+            if hold_id is None:
+                raise HTTPException(status_code=409, detail="inventory unavailable")
+            return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
+        finally:
+            hold_admission.release()
 
     @app.post("/holds/{hold_id}/checkout", status_code=201)
     async def checkout(
