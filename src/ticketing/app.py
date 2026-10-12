@@ -6,7 +6,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -379,7 +379,7 @@ def create_app() -> FastAPI:
     async def graceful_shutdown() -> None:
         app.state.accepting = False
 
-    @app.get("/metrics")
+    @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
         lines = [
             "# TYPE ticketing_up gauge",
@@ -412,7 +412,7 @@ def create_app() -> FastAPI:
                 f'ticketing_request_duration_seconds_count{{endpoint="{endpoint}"}} '
                 f'{histogram["count"]}'
             )
-        return "\\n".join(lines) + "\\n"
+        return "\n".join(lines) + "\n"
 
     return app
 

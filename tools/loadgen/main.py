@@ -113,27 +113,39 @@ async def buyer(
 async def scrape_server_metrics(
     client: httpx.AsyncClient, base_url: str
 ) -> dict[str, float | int]:
-    response = await client.get(f"{base_url}/metrics")
-    response.raise_for_status()
+    responses = []
+    for _ in range(4):
+        response = await client.get(
+            f"{base_url}/metrics", headers={"Connection": "close"}
+        )
+        response.raise_for_status()
+        responses.append(response.text)
     buckets: dict[str, list[tuple[float, int]]] = {}
     counts: dict[str, int] = {}
-    for line in response.text.splitlines():
-        match = re.match(
-            r'ticketing_request_duration_seconds_bucket\{endpoint="([^"]+)",le="([^"]+)"\} (\d+)',
-            line,
-        )
-        if not match:
-            continue
-        endpoint, bound, count = match.groups()
-        if bound == "+Inf":
-            counts[endpoint] = int(count)
-        else:
-            buckets.setdefault(endpoint, []).append((float(bound), int(count)))
+    for body in responses:
+        for line in body.splitlines():
+            match = re.match(
+                r'ticketing_request_duration_seconds_bucket\{'
+                r'endpoint="([^"]+)",le="([^"]+)"\} (\d+)',
+                line,
+            )
+            if not match:
+                continue
+            endpoint, bound, count = match.groups()
+            if bound == "+Inf":
+                counts[endpoint] = counts.get(endpoint, 0) + int(count)
+            else:
+                buckets.setdefault(endpoint, []).append((float(bound), int(count)))
     result: dict[str, float | int] = {}
     for endpoint, values in buckets.items():
         total = counts.get(endpoint, 0)
+        by_bound: dict[float, int] = {}
+        for bound, count in values:
+            by_bound[bound] = by_bound.get(bound, 0) + count
         target = total * 0.99
-        bound = next((bound for bound, count in values if count >= target), 0.0)
+        bound = next(
+            (bound for bound in sorted(by_bound) if by_bound[bound] >= target), 0.0
+        )
         result[f"server_{endpoint}_count"] = total
         result[f"server_{endpoint}_p99_bucket_ms"] = bound * 1000
     return result
