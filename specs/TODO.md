@@ -1,7 +1,7 @@
 # TODO
 
 ## Open
-- [ ] Write 002 state machine and API spec; update specs index and TODO
+- [ ] Create project skeleton, settings, clock, faults, observability, store interfaces, migrations, and baseline tests
 - [ ] Create project skeleton, settings, clock, faults, observability, store interfaces, migrations, and baseline tests
 - [ ] Implement inventory, holds, orders, idempotency, payments, webhooks, and tickets with tests
 - [ ] Implement outbox, DLQ, refunds, check-in, auth, admin, waiting room, and resilience controls with tests
