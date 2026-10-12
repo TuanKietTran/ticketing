@@ -1,8 +1,8 @@
 # TODO
 
 ## Gap analysis (against specs/000-brief.md)
-- [ ] Replace in-memory reference services with real async SQLAlchemy/PostgreSQL persistence and Redis integration.
-- [ ] Add complete forward-only Alembic migrations for organizers, catalog, inventory, holds, orders, order_events, idempotency, charges, tickets, scans, webhooks, outbox, and dead_letters, including CHECK/unique constraints.
+- [x] Replace in-memory reference services with real async SQLAlchemy/PostgreSQL persistence and Redis integration.
+- [x] Add complete forward-only Alembic migrations for organizers, catalog, inventory, holds, orders, order_events, idempotency, charges, tickets, scans, webhooks, outbox, and dead_letters, including CHECK/unique constraints.
 - [ ] Implement guarded SQL inventory UPDATEs, hold TTL/reaper, reserved seats, general admission, and real 200-way PostgreSQL race tests on 10 seats.
 - [ ] Implement HTTP Idempotency-Key middleware with atomic claim, body mismatch 422, replayed status/body, expiry, concurrent duplicate waiting/409, and R1/R3 tests.
 - [ ] Implement complete order/payment persistence, PSP retry/timeout/failure modes, signed durable webhook endpoint, dedupe/out-of-order handling, reconciliation, and charge ledger.
@@ -20,7 +20,6 @@
 - [ ] Update README/runbook/specs/FINAL.md with verified scope and known limits; commit/push each milestone with required identity/signing/trailer rules.
 
 ## Open
-- [ ] Milestone 1: real PostgreSQL schema/Alembic/SQLAlchemy/Redis compose foundation
 - [ ] Milestone 2: guarded inventory holds, reaper, and 200-way PostgreSQL race tests
 - [ ] Milestone 3: Idempotency-Key middleware and R1/R3 tests
 - [ ] Milestone 4: persistent orders/payments/webhooks/reconciliation and tickets/check-in
@@ -30,6 +29,7 @@
 
 ## Done
 - [x] Initial reference implementation was rejected as insufficient; retained only as scaffolding
+- [x] Milestone 1: real PostgreSQL schema/Alembic/SQLAlchemy/Redis compose foundation
 - [x] Write 001 data model and invariants spec; update specs index and TODO
 - [x] Write 002 state machine and API spec; update specs index and TODO
 - [x] Create project skeleton, settings, clock, faults, observability, store interfaces, migrations, and baseline tests
