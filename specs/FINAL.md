@@ -12,7 +12,7 @@
 ## Acceptance failures and limits
 - Earlier 10k runs failed with connection exhaustion/deadlocks and produced 328 ticketed/672 held; those failures remain recorded.
 - The latest corrected 10k run passed database invariants: 1,000 sold, 1,000 ticketed, 0 held, 0 leaked holds, 0 duplicate ticket sets, and 1,000 successful charges. Its end-to-end p99 was 56,195.87 ms, far above the brief's browse/hold targets.
-- Three normal 10k repeats and the fault-injection worker-kill run remain unverified.
+- Three normal and one worker-kill fault-injected 10k runs are now recorded in `specs/load-results.md`; all four passed the database invariants (1,000 sold/ticketed, zero held/leaked, zero duplicate sets, 1,000 charges). Their p99 values were 56,195.87, 50,385.45, 51,515.47, and 52,882.97 ms respectively, so the latency acceptance still fails.
 - Browse/hold-specific p99, error rate, PSP failure injection, full chaos scenarios, ticket-set/ledger acceptance at 1,000 seats, and production crash convergence remain unverified.
 - The code contains persistent adapters and controls, but full production-grade tenant isolation, worker orchestration, and all dependency failure paths still require hardening.
 
