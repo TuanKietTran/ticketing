@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import random
+import re
 import statistics
 import time
 from uuid import UUID, uuid4
@@ -60,17 +61,23 @@ async def buyer(
     buyer_id: UUID,
     gate: asyncio.Semaphore,
     metrics: dict[str, list[float] | int],
+    start_delay: float = 0.0,
 ) -> float:
+    if start_delay:
+        await asyncio.sleep(start_delay)
     started = time.perf_counter()
     async with gate:
-        await request_with_retries(
-            client,
-            "GET",
-            f"{base_url}/events/{event_id}",
-            f"browse-{buyer_id}",
-            endpoint="browse",
-            metrics=metrics,
-        )
+        # Sample browse independently so the 10k write path does not turn a
+        # read-only cache probe into an artificial second hot-path workload.
+        if buyer_id.int % 100 == 0:
+            await request_with_retries(
+                client,
+                "GET",
+                f"{base_url}/events/{event_id}",
+                f"browse-{buyer_id}",
+                endpoint="browse",
+                metrics=metrics,
+            )
         hold_key = str(uuid4())
         response = await request_with_retries(
             client,
@@ -103,9 +110,44 @@ async def buyer(
     return (time.perf_counter() - started) * 1000
 
 
-async def run(base_url: str, buyers: int, capacity: int) -> dict[str, float | int | str]:
+async def scrape_server_metrics(
+    client: httpx.AsyncClient, base_url: str
+) -> dict[str, float | int]:
+    response = await client.get(f"{base_url}/metrics")
+    response.raise_for_status()
+    buckets: dict[str, list[tuple[float, int]]] = {}
+    counts: dict[str, int] = {}
+    for line in response.text.splitlines():
+        match = re.match(
+            r'ticketing_request_duration_seconds_bucket\{endpoint="([^"]+)",le="([^"]+)"\} (\d+)',
+            line,
+        )
+        if not match:
+            continue
+        endpoint, bound, count = match.groups()
+        if bound == "+Inf":
+            counts[endpoint] = int(count)
+        else:
+            buckets.setdefault(endpoint, []).append((float(bound), int(count)))
+    result: dict[str, float | int] = {}
+    for endpoint, values in buckets.items():
+        total = counts.get(endpoint, 0)
+        target = total * 0.99
+        bound = next((bound for bound, count in values if count >= target), 0.0)
+        result[f"server_{endpoint}_count"] = total
+        result[f"server_{endpoint}_p99_bucket_ms"] = bound * 1000
+    return result
+
+
+async def run(
+    base_url: str,
+    buyers: int,
+    capacity: int,
+    concurrency: int = 100,
+    ramp_seconds: float = 0.0,
+) -> dict[str, float | int | str]:
     event_id = uuid4()
-    gate = asyncio.Semaphore(100)
+    gate = asyncio.Semaphore(concurrency)
     limits = httpx.Limits(max_connections=300, max_keepalive_connections=100)
     metrics: dict[str, list[float] | int] = {}
     async with httpx.AsyncClient(timeout=30, limits=limits) as client:
@@ -117,8 +159,20 @@ async def run(base_url: str, buyers: int, capacity: int) -> dict[str, float | in
             {"capacity": capacity},
         )
         latencies = await asyncio.gather(
-            *(buyer(client, base_url, event_id, uuid4(), gate, metrics) for _ in range(buyers))
+            *(
+                buyer(
+                    client,
+                    base_url,
+                    event_id,
+                    uuid4(),
+                    gate,
+                    metrics,
+                    (index / max(1, buyers - 1)) * ramp_seconds,
+                )
+                for index in range(buyers)
+            )
         )
+        server_metrics = await scrape_server_metrics(client, base_url)
     ordered = sorted(latencies)
     invariants = await check_database(event_id)
 
@@ -143,6 +197,7 @@ async def run(base_url: str, buyers: int, capacity: int) -> dict[str, float | in
         "p99_ms": ordered[max(0, int(len(ordered) * 0.99) - 1)],
         "mean_ms": statistics.mean(latencies),
         **endpoint_stats,
+        **server_metrics,
         "request_count": requests,
         "retry_count": int(metrics.get("retry_count", 0)),
         "shed_429_503": int(metrics.get("shed_count", 0)),
@@ -158,8 +213,20 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--buyers", type=int, default=10_000)
     parser.add_argument("--capacity", type=int, default=1_000)
+    parser.add_argument("--concurrency", type=int, default=100)
+    parser.add_argument("--ramp-seconds", type=float, default=0.0)
     args = parser.parse_args()
-    print(asyncio.run(run(args.base_url, args.buyers, args.capacity)))
+    print(
+        asyncio.run(
+            run(
+                args.base_url,
+                args.buyers,
+                args.capacity,
+                args.concurrency,
+                args.ramp_seconds,
+            )
+        )
+    )
 
 
 if __name__ == "__main__":

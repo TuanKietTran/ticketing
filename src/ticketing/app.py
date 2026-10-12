@@ -37,6 +37,33 @@ def create_app() -> FastAPI:
     app.add_middleware(IdempotencyMiddleware, sessions=sessions)
     app.state.accepting = True
     metrics_state = {"requests": 0, "inflight": 0, "errors": 0}
+    duration_buckets = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30)
+    duration_histograms: dict[str, dict[str, object]] = {}
+
+    def endpoint_name(request: Request) -> str:
+        path = request.url.path
+        if request.method == "GET" and path.startswith("/events/"):
+            return "browse"
+        if path.endswith("/holds"):
+            return "hold"
+        if path.endswith("/checkout"):
+            return "checkout"
+        if path.endswith("/pay"):
+            return "pay"
+        return "other"
+
+    def record_duration(endpoint: str, elapsed_seconds: float) -> None:
+        histogram = duration_histograms.setdefault(
+            endpoint, {"count": 0, "sum": 0.0, "buckets": [0] * len(duration_buckets)}
+        )
+        histogram["count"] = int(histogram["count"]) + 1
+        histogram["sum"] = float(histogram["sum"]) + elapsed_seconds
+        buckets = histogram["buckets"]
+        assert isinstance(buckets, list)
+        for index, bound in enumerate(duration_buckets):
+            if elapsed_seconds <= bound:
+                buckets[index] += 1
+
     inventory = Inventory()
     psp = MockPSP()
     ticket_service = TicketService("development-only-change-me")
@@ -58,6 +85,8 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
         rid = request.headers.get("X-Request-ID") or new_request_id()
+        started = time.perf_counter()
+        endpoint = endpoint_name(request)
         token = request_id.set(rid)
         metrics_state["requests"] += 1
         metrics_state["inflight"] += 1
@@ -74,6 +103,7 @@ def create_app() -> FastAPI:
             )
         finally:
             metrics_state["inflight"] -= 1
+            record_duration(endpoint, time.perf_counter() - started)
             request_id.reset(token)
 
     class InventoryRequest(BaseModel):
@@ -351,13 +381,38 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics")
     async def metrics() -> str:
-        return (
-            "# TYPE ticketing_up gauge\n"
-            "ticketing_up 1\n"
-            f"ticketing_requests_total {metrics_state['requests']}\n"
-            f"ticketing_inflight {metrics_state['inflight']}\n"
-            f"ticketing_errors_total {metrics_state['errors']}\n"
-        )
+        lines = [
+            "# TYPE ticketing_up gauge",
+            "ticketing_up 1",
+            "# TYPE ticketing_requests_total counter",
+            f"ticketing_requests_total {metrics_state['requests']}",
+            "# TYPE ticketing_inflight gauge",
+            f"ticketing_inflight {metrics_state['inflight']}",
+            "# TYPE ticketing_errors_total counter",
+            f"ticketing_errors_total {metrics_state['errors']}",
+            "# TYPE ticketing_request_duration_seconds histogram",
+        ]
+        for endpoint, histogram in duration_histograms.items():
+            buckets = histogram["buckets"]
+            assert isinstance(buckets, list)
+            for bound, count in zip(duration_buckets, buckets, strict=False):
+                lines.append(
+                    "ticketing_request_duration_seconds_bucket{"
+                    f'endpoint="{endpoint}",le="{bound}"}} {count}'
+                )
+            lines.append(
+                f'ticketing_request_duration_seconds_bucket{{endpoint="{endpoint}",le="+Inf"}} '
+                f'{histogram["count"]}'
+            )
+            lines.append(
+                f'ticketing_request_duration_seconds_sum{{endpoint="{endpoint}"}} '
+                f'{histogram["sum"]}'
+            )
+            lines.append(
+                f'ticketing_request_duration_seconds_count{{endpoint="{endpoint}"}} '
+                f'{histogram["count"]}'
+            )
+        return "\\n".join(lines) + "\\n"
 
     return app
 
