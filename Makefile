@@ -5,7 +5,10 @@ test:
 	uv run ruff check .
 
 load:
-	uv run python -m tools.loadgen.main --buyers 10000 --capacity 1000
+	ulimit -n 65536; uv run python -m tools.loadgen.main --buyers 10000 --capacity 1000 --concurrency 100 --ramp-seconds 5
+
+load-split:
+	ulimit -n 65536; seq 1 4 | xargs -P4 -I{} uv run python -m tools.loadgen.main --buyers 2500 --capacity 250 --concurrency 50 --ramp-seconds 2
 
 chaos:
 	uv run python -m tools.chaos.main

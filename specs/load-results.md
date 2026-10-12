@@ -15,6 +15,10 @@ For all four runs: 10,000 clients completed, terminal nonwinners 0, paid-not-tic
 
 The instrumented 100-buyer/10-capacity profile reported (second run): browse p50/p99 302.81/1,136.18 ms, hold 345.47/976.78 ms, pay 71.08/416.06 ms, and no poll endpoint traffic. It recorded 220 requests, zero retries, 90 expected sold-out 409 responses, zero 429/503 shedding, and zero unexpected errors. A prior profile measured browse 251.50/845.37 ms and hold 152.14/734.49 ms. Redis-backed catalog reads remove inventory-row writes, but the target is not met consistently; the remaining bottleneck is concurrent request scheduling and the synchronous multi-step hold/checkout/pay flow. No claim is made that the browse/hold targets pass.
 
+## Server/client measurement
+
+`tools.loadgen` now reports client-observed endpoint latency separately from server-side Prometheus histogram bucket p99 values scraped from `/metrics`; four scrapes aggregate the four Uvicorn workers. The load runner supports bounded `--concurrency`, `--ramp-seconds`, and `make load-split`. Local `uvicorn[standard]` provides uvloop 0.23.0 and httptools 0.9.0; `make load` raises the file-descriptor limit and uses a five-second ramp. A 20-buyer verification reported client hold p99 128.15 ms versus server hold p99 bucket 250 ms.
+
 ## Acceptance gaps
 
 Browse and hold-specific p99 were not separately instrumented; the measured end-to-end p99 is far above the brief's `<300 ms browse` and `<800 ms hold` targets. Intentional 429/503 error rate was not separately reported. Full PSP 5xx/latency/charged-timeout, DB lock, webhook reorder, clock-jump, and DLQ-growth scenarios were not all exercised by the runner. The four invariant runs pass; the complete acceptance criteria do not.
