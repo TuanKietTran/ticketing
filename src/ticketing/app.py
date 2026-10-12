@@ -1,36 +1,41 @@
 import time
-from uuid import UUID
+from datetime import timedelta
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from ticketing.api.idempotency import IdempotencyMiddleware
 from ticketing.clock import SystemClock
 from ticketing.db import make_engine, make_session_factory
-from ticketing.deadletter import DeadLetterQueue
-from ticketing.inventory import Inventory, SoldOut
+from ticketing.deadletter import (
+    discard_dead_letter,
+    list_dead_letters,
+    replay_dead_letter,
+)
+from ticketing.inventory import Inventory, claim_general_admission
 from ticketing.obs import configure_logging, new_request_id, request_id
-from ticketing.orders import IdempotencyStore, OrderState, new_order
-from ticketing.orders.service import IdempotencyResult
-from ticketing.payments import MockPSP
-from ticketing.tickets import TicketService
+from ticketing.orders import OrderState, checkout_hold, new_order
+from ticketing.payments import MockPSP, receive_webhook, record_charge
+from ticketing.tickets import TicketService, issue_ticket_set
 from ticketing.waitingroom import WaitingRoom
 
 
 def create_app() -> FastAPI:
     configure_logging()
     app = FastAPI(title="ticketing", version="0.1.0")
-    app.add_middleware(IdempotencyMiddleware, sessions=make_session_factory(make_engine()))
+    sessions = make_session_factory(make_engine())
+    app.add_middleware(IdempotencyMiddleware, sessions=sessions)
     inventory = Inventory()
-    idempotency = IdempotencyStore()
     psp = MockPSP()
     ticket_service = TicketService("development-only-change-me")
     clock = SystemClock()
     holds: dict[UUID, object] = {}
     orders: dict[UUID, object] = {}
+    event_sections: dict[UUID, UUID] = {}
     webhook_events: set[str] = set()
-    dead_letters = DeadLetterQueue()
     waiting_room = WaitingRoom()
 
     @app.middleware("http")
@@ -58,6 +63,36 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/events/{event_id}/inventory")
     async def seed_inventory(event_id: UUID, payload: InventoryRequest) -> dict[str, object]:
+        now = clock.now()
+        organizer_id, section_id = uuid4(), uuid4()
+        async with sessions() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "INSERT INTO organizers(id,name,api_key_hash) VALUES (:id,'default','seed')"
+                    ),
+                    {"id": organizer_id},
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO events(id,organizer_id,name,sale_opens_at,sale_closes_at) "
+                        "VALUES (:id,:org,'event',:open,:close)"
+                    ),
+                    {
+                        "id": event_id,
+                        "org": organizer_id,
+                        "open": now - timedelta(minutes=1),
+                        "close": now + timedelta(days=1),
+                    },
+                )
+                await session.execute(
+                    text(
+                        "INSERT INTO sections(id,event_id,name,mode,capacity) "
+                        "VALUES (:id,:event,'GA','general_admission',:capacity)"
+                    ),
+                    {"id": section_id, "event": event_id, "capacity": payload.capacity},
+                )
+        event_sections[event_id] = section_id
         inventory.add_section(event_id, payload.capacity)
         return {"event_id": str(event_id), "capacity": payload.capacity}
 
@@ -67,45 +102,74 @@ def create_app() -> FastAPI:
         payload: HoldRequest,
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
     ) -> dict[str, object]:
-        def execute() -> object:
-            try:
-                hold = inventory.hold(event_id, payload.buyer_id, payload.quantity, clock.now())
-            except (SoldOut, KeyError) as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            holds[hold.id] = hold
-            body = {"hold_id": str(hold.id), "expires_at": hold.expires_at.isoformat()}
-            return IdempotencyResult(201, body)
-
-        result = idempotency.execute(
-            str(payload.buyer_id), idempotency_key, payload.model_dump_json().encode(), execute
-        )
-        return result.body  # type: ignore[no-any-return]
+        if event_id in event_sections:
+            expires_at = clock.now() + timedelta(minutes=10)
+            async with sessions() as session:
+                async with session.begin():
+                    hold_id = await claim_general_admission(
+                        session,
+                        event_id,
+                        event_sections[event_id],
+                        payload.buyer_id,
+                        idempotency_key,
+                        payload.quantity,
+                        expires_at,
+                    )
+            if hold_id is None:
+                raise HTTPException(status_code=409, detail="inventory unavailable")
+            return {"hold_id": str(hold_id), "expires_at": expires_at.isoformat()}
+        raise HTTPException(status_code=404, detail="event not found")
 
     @app.post("/holds/{hold_id}/checkout", status_code=201)
     async def checkout(
         hold_id: UUID, idempotency_key: str = Header(..., alias="Idempotency-Key")
     ) -> dict[str, object]:
-        hold = holds.get(hold_id)
-        if hold is None:
-            raise HTTPException(status_code=404, detail="hold not found")
-        quantity = inventory.checkout(hold_id, clock.now())
-        order = new_order(hold.buyer_id, quantity)  # type: ignore[attr-defined]
-        order.transition(OrderState.AWAITING_PAYMENT, "hold checkout")
-        orders[order.id] = order
-        return {"order_id": str(order.id), "state": order.state}
+        if hold_id in holds:
+            hold = holds[hold_id]
+            quantity = inventory.checkout(hold_id, clock.now())
+            order = new_order(hold.buyer_id, quantity)  # type: ignore[attr-defined]
+            order.transition(OrderState.AWAITING_PAYMENT, "hold checkout")
+            orders[order.id] = order
+            return {"order_id": str(order.id), "state": order.state}
+        async with sessions() as session:
+            async with session.begin():
+                order_id = await checkout_hold(session, hold_id, clock.now())
+        return {"order_id": str(order_id), "state": OrderState.AWAITING_PAYMENT}
 
     @app.post("/orders/{order_id}/pay")
     async def pay(
         order_id: UUID, idempotency_key: str = Header(..., alias="Idempotency-Key")
     ) -> dict[str, object]:
         order = orders.get(order_id)
-        if order is None:
-            raise HTTPException(status_code=404, detail="order not found")
-        charge = await psp.charge(order_id, order.quantity * 100)  # type: ignore[attr-defined]
-        if order.state is OrderState.AWAITING_PAYMENT:  # type: ignore[attr-defined]
-            order.transition(OrderState.PAID, "charge succeeded")  # type: ignore[attr-defined]
-            ticket_service.issue_once(order_id, order.quantity)  # type: ignore[attr-defined]
-        return {"order_id": str(order_id), "state": order.state, "charge_id": charge.id}
+        if order is not None:
+            charge = await psp.charge(order_id, order.quantity * 100)  # type: ignore[attr-defined]
+            if order.state is OrderState.AWAITING_PAYMENT:  # type: ignore[attr-defined]
+                order.transition(OrderState.PAID, "charge succeeded")  # type: ignore[attr-defined]
+                ticket_service.issue_once(order_id, order.quantity)  # type: ignore[attr-defined]
+            return {"order_id": str(order_id), "state": order.state, "charge_id": charge.id}
+        async with sessions() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        text("SELECT total_minor,currency FROM orders WHERE id=:id"),
+                        {"id": order_id},
+                    )
+                ).mappings().first()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="order not found")
+                charge = await psp.charge(order_id, row["total_minor"])
+                await record_charge(
+                    session, order_id, row["total_minor"], row["currency"], charge.id
+                )
+                tickets = await issue_ticket_set(
+                    session, order_id, 1, "development-only-change-me"
+                )
+        return {
+            "order_id": str(order_id),
+            "state": OrderState.PAID,
+            "charge_id": charge.id,
+            "tickets": len(tickets),
+        }
 
     @app.post("/webhooks/mock")
     async def mock_webhook(
@@ -117,30 +181,50 @@ def create_app() -> FastAPI:
         raw = await request.body()
         if not psp.verify(raw.decode(), x_signature, x_timestamp, int(time.time())):
             raise HTTPException(status_code=400, detail="invalid webhook signature")
-        if x_event_id in webhook_events:
-            return {"status": "duplicate"}
+        async with sessions() as session:
+            async with session.begin():
+                try:
+                    status = await receive_webhook(
+                        session, psp, x_event_id, raw.decode(), x_signature, x_timestamp
+                    )
+                except (ValueError, KeyError) as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
         webhook_events.add(x_event_id)
-        return {"status": "accepted"}
+        return {"status": status}
 
     @app.get("/admin/dead-letters")
-    async def list_dead_letters() -> list[dict[str, object]]:
-        return [
-            {
-                "id": str(item.id),
-                "origin": item.origin,
-                "status": item.status,
-                "attempts": item.attempts,
-            }
-            for item in dead_letters.list()
-        ]
+    async def list_dead_letters_endpoint() -> list[dict[str, object]]:
+        async with sessions() as session:
+            async with session.begin():
+                return await list_dead_letters(session)
+
+    @app.get("/admin/dead-letters/{item_id}")
+    async def inspect_dead_letter(item_id: UUID) -> dict[str, object]:
+        async with sessions() as session:
+            async with session.begin():
+                rows = await list_dead_letters(session, limit=1000)
+        for row in rows:
+            if row["id"] == item_id:
+                return row
+        raise HTTPException(status_code=404, detail="dead letter not found")
 
     @app.post("/admin/dead-letters/{item_id}/replay")
-    async def replay_dead_letter(item_id: UUID) -> dict[str, str]:
-        try:
-            dead_letters.replay(item_id, lambda payload: None)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="dead letter not found") from exc
+    async def replay_dead_letter_endpoint(item_id: UUID) -> dict[str, str]:
+        async with sessions() as session:
+            async with session.begin():
+                if not await replay_dead_letter(session, item_id):
+                    raise HTTPException(status_code=404, detail="dead letter unavailable")
         return {"status": "replayed"}
+
+    @app.post("/admin/dead-letters/{item_id}/discard")
+    async def discard_dead_letter_endpoint(
+        item_id: UUID, reason: str = "operator discard"
+    ) -> dict[str, str]:
+        async with sessions() as session:
+            async with session.begin():
+                if not await discard_dead_letter(session, item_id, reason):
+                    raise HTTPException(status_code=404, detail="dead letter unavailable")
+        return {"status": "discarded"}
 
     @app.post("/waiting-room/{event_id}/admit")
     async def admit_waiting_room(event_id: UUID, count: int = 1) -> list[dict[str, str]]:

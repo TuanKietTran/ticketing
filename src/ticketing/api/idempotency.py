@@ -19,7 +19,11 @@ class IdempotencyMiddleware:
         self.sessions = sessions
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http" or scope.get("method") in {"GET", "HEAD", "OPTIONS"}:
+        if (
+            scope["type"] != "http"
+            or scope.get("method") in {"GET", "HEAD", "OPTIONS"}
+            or scope.get("path", "").startswith("/webhooks/")
+        ):
             await self.app(scope, receive, send)
             return
         request = Request(scope, receive)
