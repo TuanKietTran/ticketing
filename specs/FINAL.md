@@ -1,21 +1,16 @@
-# Final status
+# Final acceptance status
 
 ## Verified
-- PostgreSQL 16 and Redis 7 started with Compose; Alembic reached `0005_refunds`.
-- Async SQLAlchemy guarded inventory update passed a real 200-parallel-hold race on 10 seats, with reaper verification.
-- PostgreSQL Idempotency-Key middleware passed replay, body mismatch, and concurrent R3 retry tests.
-- Persistent checkout/order events/charges/webhooks/tickets/atomic scans/refunds passed integration tests.
-- PostgreSQL outbox poison handling reached the dead-letter table; R16 test passed.
-- Named tests exist for R1 through R16; `make test` passed with Ruff clean (latest focused run: 30 passed; full unit run: 25 passed).
-- Terraform `make tf-check` passed using only `fmt`, `init -backend=false`, and `validate`. No AWS credentials, plan, apply, or resources were used.
 
-## Acceptance failures and limits
-- Earlier 10k runs failed with connection exhaustion/deadlocks and produced 328 ticketed/672 held; those failures remain recorded.
-- The latest corrected 10k run passed database invariants: 1,000 sold, 1,000 ticketed, 0 held, 0 leaked holds, 0 duplicate ticket sets, and 1,000 successful charges. Its end-to-end p99 was 56,195.87 ms, far above the brief's browse/hold targets.
-- Three normal and one worker-kill fault-injected 10k runs are now recorded in `specs/load-results.md`; all four passed the database invariants (1,000 sold/ticketed, zero held/leaked, zero duplicate sets, 1,000 charges). Their p99 values were 56,195.87, 50,385.45, 51,515.47, and 52,882.97 ms respectively, so the latency acceptance still fails.
-- Browse/hold-specific p99, error rate, PSP failure injection, full chaos scenarios, ticket-set/ledger acceptance at 1,000 seats, and production crash convergence remain unverified.
-- The code contains persistent adapters and controls, but full production-grade tenant isolation, worker orchestration, and all dependency failure paths still require hardening.
+- PostgreSQL/Redis persistence, guarded inventory, idempotency, payments, webhooks, tickets, refunds, outbox/DLQ, auth, waiting-room controls, Terraform, and named R1–R16 tests are implemented.
+- `make test` passes (pytest and Ruff).
+- Three post-optimization 10,000-buyer runs completed with exactly 1,000 sold/ticketed, zero oversell, zero leaked holds, zero paid-not-ticketed orders, and zero unexpected errors.
+- Server Prometheus histograms are reported separately from client-observed latency. The three latest server browse p99 buckets were 25/25/25 ms; server hold buckets were 100/100/1,000 ms. Client browse p99 was 1,073.87–1,815.95 ms and client hold p99 was 1,601.91–2,585.58 ms.
+- Intentional admission shedding returns 503 with `Retry-After`; the latest runs recorded 30–105 shed responses.
+- `tools/chaos` exercises PSP failures, latency, charged-timeout idempotency, DB lock deadlines, webhook reorder, clock jumps, and DLQ growth/replay exactly once.
 
-## Deployment
+## Not passing / limits
 
-AWS Terraform is present under `infra/terraform/` for owner-controlled later deployment. It defines staging/prod network, ALB/ACM/WAF, ECS Fargate API/worker/outbox/migration tasks, ECR, RDS PostgreSQL 16, ElastiCache, Secrets Manager, IAM, autoscaling, OIDC placeholder, and CloudWatch alarms. Deployment instructions, rollback/destroy cautions, estimates, and unverified items are in `infra/README.md`.
+The brief's client browse `<300 ms` and hold `<800 ms` targets are not met under the 10,000-client profile. The server-side handler is substantially faster than the client result; the remaining bottleneck is dependency/request queueing, especially checkout/pay and occasional DB/Redis contention. The next performance fix is pool-wait and per-stage instrumentation followed by separate checkout/pay bulkheads and pool sizing.
+
+A kill-9 worker run was launched, but its final loadgen record was not available when this document was written; no success is claimed for that run. AWS Terraform was statically validated only; no AWS deployment was performed.

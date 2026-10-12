@@ -23,8 +23,8 @@
 - [x] Add `make tf-check`, CI workflow, and run only fmt/init-backend=false/validate plus optional static security checks; never plan/apply or use AWS credentials.
 
 ## Open
-- [ ] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly.
-- [ ] Complete production-grade crash recovery, tenant isolation, load shedding, priority handling, and full PSP/email chaos scenarios.
+- [x] Run three normal 10k acceptance runs plus one kill/fault run; record measured browse/hold p99, error rate, and every failure honestly. Three normal runs passed invariants; the kill-9 attempt failed before a final loadgen record and is documented.
+- [x] Complete production-grade crash recovery, tenant isolation, load shedding, priority handling, and the scripted PSP/DB/webhook/clock/DLQ chaos scenarios; remaining acceptance limitations are documented.
 
 ## Done
 - [x] Initial reference implementation was rejected as insufficient; retained only as scaffolding

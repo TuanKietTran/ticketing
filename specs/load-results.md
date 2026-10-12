@@ -19,6 +19,20 @@ The instrumented 100-buyer/10-capacity profile reported (second run): browse p50
 
 `tools.loadgen` now reports client-observed endpoint latency separately from server-side Prometheus histogram bucket p99 values scraped from `/metrics`; four scrapes aggregate the four Uvicorn workers. The load runner supports bounded `--concurrency`, `--ramp-seconds`, and `make load-split`. Local `uvicorn[standard]` provides uvloop 0.23.0 and httptools 0.9.0; `make load` raises the file-descriptor limit and uses a five-second ramp. A 20-buyer verification reported client hold p99 128.15 ms versus server hold p99 bucket 250 ms.
 
+## Post-admission-control reruns
+
+Runs 5–7 used four Uvicorn workers, a five-second ramp, concurrency 100, and the guarded hold admission semaphore. All completed 10,000 clients with sold/ticketed 1,000, held 0, leaked holds 0, paid-not-ticketed 0, and zero unexpected errors. The intentional shedding counts were 105, 96, and 30 respectively.
+
+| Run | Fault | Client browse p99 | Client hold p99 | Server browse p99 bucket | Server hold p99 bucket | E2E p99 | Mean | Result |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| 5 | none | 1,618.18 ms | 2,102.06 ms | 25 ms | 100 ms | 49,656.42 ms | 33,020.71 ms | invariants pass; latency fail |
+| 6 | none | 1,073.87 ms | 1,601.91 ms | 25 ms | 100 ms | 37,639.55 ms | 25,041.71 ms | invariants pass; latency fail |
+| 7 | none | 1,815.95 ms | 2,585.58 ms | 25 ms | 1,000 ms | 56,436.38 ms | 39,742.73 ms | invariants pass; latency fail |
+
+The server/client split shows the dominant remaining cost is client-visible queueing and dependency contention: server browse is 25 ms p99 bucket and server hold is 100 ms in two runs, while client hold is 1.6–2.6 s. Run 7 also captured a 1,000 ms server hold bucket. The next fix is to instrument and remove the remaining checkout/pay queue contention (separate checkout/pay bulkheads and DB/Redis pool wait histograms), not to loosen acceptance targets. The 503 admission responses are intentionally shed and are returned after the 10 ms gate timeout; the current loadgen does not retry all shed responses, so they must remain excluded from unexpected-error rate.
+
+A kill-9 worker run was launched after these three runs; its final loadgen record is not yet available in this checkout and is not claimed as passed.
+
 ## Acceptance gaps
 
 Browse and hold-specific p99 were not separately instrumented; the measured end-to-end p99 is far above the brief's `<300 ms browse` and `<800 ms hold` targets. Intentional 429/503 error rate was not separately reported. Full PSP 5xx/latency/charged-timeout, DB lock, webhook reorder, clock-jump, and DLQ-growth scenarios were not all exercised by the runner. The four invariant runs pass; the complete acceptance criteria do not.
