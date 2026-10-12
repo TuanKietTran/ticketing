@@ -6,12 +6,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ticketing.clock import SystemClock
+from ticketing.deadletter import DeadLetterQueue
 from ticketing.inventory import Inventory, SoldOut
 from ticketing.obs import configure_logging, new_request_id, request_id
 from ticketing.orders import IdempotencyStore, OrderState, new_order
 from ticketing.orders.service import IdempotencyResult
 from ticketing.payments import MockPSP
 from ticketing.tickets import TicketService
+from ticketing.waitingroom import WaitingRoom
 
 
 def create_app() -> FastAPI:
@@ -25,6 +27,8 @@ def create_app() -> FastAPI:
     holds: dict[UUID, object] = {}
     orders: dict[UUID, object] = {}
     webhook_events: set[str] = set()
+    dead_letters = DeadLetterQueue()
+    waiting_room = WaitingRoom()
 
     @app.middleware("http")
     async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -114,6 +118,31 @@ def create_app() -> FastAPI:
             return {"status": "duplicate"}
         webhook_events.add(x_event_id)
         return {"status": "accepted"}
+
+    @app.get("/admin/dead-letters")
+    async def list_dead_letters() -> list[dict[str, object]]:
+        return [
+            {
+                "id": str(item.id),
+                "origin": item.origin,
+                "status": item.status,
+                "attempts": item.attempts,
+            }
+            for item in dead_letters.list()
+        ]
+
+    @app.post("/admin/dead-letters/{item_id}/replay")
+    async def replay_dead_letter(item_id: UUID) -> dict[str, str]:
+        try:
+            dead_letters.replay(item_id, lambda payload: None)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="dead letter not found") from exc
+        return {"status": "replayed"}
+
+    @app.post("/waiting-room/{event_id}/admit")
+    async def admit_waiting_room(event_id: UUID, count: int = 1) -> list[dict[str, str]]:
+        del event_id
+        return [{"token": str(admission.token)} for admission in waiting_room.admit(count)]
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
