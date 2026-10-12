@@ -10,6 +10,7 @@ from ticketing.orders.postgres import checkout_hold
 from ticketing.payments.mock import MockPSP
 from ticketing.payments.postgres import record_charge
 from ticketing.payments.webhook import receive_webhook
+from ticketing.refunds.postgres import refund_order
 from ticketing.tickets.postgres import issue_ticket_set, scan_ticket
 
 
@@ -77,9 +78,15 @@ async def test_R8_persistent_checkout_charge_ticket_and_atomic_scan() -> None:
     async with factory() as session:
         async with session.begin():
             second_scan = await scan_ticket(session, tickets[0], "device-b")
+            refund_id = await refund_order(session, order_id, 1000, 1)
             state = (
                 await session.execute(
                     text("SELECT state FROM orders WHERE id=:id"), {"id": order_id}
+                )
+            ).scalar_one()
+            ticket_state = (
+                await session.execute(
+                    text("SELECT state FROM tickets WHERE id=:id"), {"id": tickets[0]}
                 )
             ).scalar_one()
             event_count = (
@@ -88,6 +95,8 @@ async def test_R8_persistent_checkout_charge_ticket_and_atomic_scan() -> None:
                 )
             ).scalar_one()
     assert first_scan and not second_scan
-    assert state == "paid"
-    assert event_count == 2
+    assert refund_id
+    assert state == "refunded"
+    assert ticket_state == "void"
+    assert event_count == 3
     await engine.dispose()

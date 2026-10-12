@@ -10,26 +10,29 @@ def test_hold_checkout_pay_flow_is_retry_safe() -> None:
     event_id, buyer_id = uuid4(), uuid4()
     seed = client.post(
         f"/admin/events/{event_id}/inventory",
-        headers={"Idempotency-Key": "seed-1"},
+        headers={"Idempotency-Key": f"seed-{event_id}"},
         json={"capacity": 1},
     )
     assert seed.status_code == 200
+    hold_key = f"hold-{buyer_id}"
     response = client.post(
         f"/events/{event_id}/holds",
-        headers={"Idempotency-Key": "hold-1"},
+        headers={"Idempotency-Key": hold_key},
         json={"buyer_id": str(buyer_id), "quantity": 1},
     )
     assert response.status_code == 201
     assert client.post(
         f"/events/{event_id}/holds",
-        headers={"Idempotency-Key": "hold-1"},
+        headers={"Idempotency-Key": hold_key},
         json={"buyer_id": str(buyer_id), "quantity": 1},
     ).json() == response.json()
     hold_id = response.json()["hold_id"]
     order_response = client.post(
-        f"/holds/{hold_id}/checkout", headers={"Idempotency-Key": "checkout-1"}
+        f"/holds/{hold_id}/checkout", headers={"Idempotency-Key": f"checkout-{buyer_id}"}
     )
     assert order_response.status_code == 201
     order_id = order_response.json()["order_id"]
-    paid = client.post(f"/orders/{order_id}/pay", headers={"Idempotency-Key": "pay-1"})
+    paid = client.post(
+        f"/orders/{order_id}/pay", headers={"Idempotency-Key": f"pay-{buyer_id}"}
+    )
     assert paid.json()["state"] == "paid"

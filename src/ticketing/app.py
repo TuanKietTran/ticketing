@@ -2,12 +2,13 @@ import time
 from datetime import timedelta
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from ticketing.api.idempotency import IdempotencyMiddleware
+from ticketing.auth import authenticate_organizer, hash_api_key
 from ticketing.clock import SystemClock
 from ticketing.db import make_engine, make_session_factory
 from ticketing.deadletter import (
@@ -19,7 +20,8 @@ from ticketing.inventory import Inventory, claim_general_admission
 from ticketing.obs import configure_logging, new_request_id, request_id
 from ticketing.orders import OrderState, checkout_hold, new_order
 from ticketing.payments import MockPSP, receive_webhook, record_charge
-from ticketing.tickets import TicketService, issue_ticket_set
+from ticketing.refunds import refund_order
+from ticketing.tickets import TicketService, issue_ticket_set, scan_ticket
 from ticketing.waitingroom import WaitingRoom
 
 
@@ -28,6 +30,8 @@ def create_app() -> FastAPI:
     app = FastAPI(title="ticketing", version="0.1.0")
     sessions = make_session_factory(make_engine())
     app.add_middleware(IdempotencyMiddleware, sessions=sessions)
+    app.state.accepting = True
+    metrics_state = {"requests": 0, "inflight": 0, "errors": 0}
     inventory = Inventory()
     psp = MockPSP()
     ticket_service = TicketService("development-only-change-me")
@@ -38,20 +42,31 @@ def create_app() -> FastAPI:
     webhook_events: set[str] = set()
     waiting_room = WaitingRoom()
 
+    async def require_admin(x_api_key: str = Header(..., alias="X-API-Key")) -> UUID:
+        async with sessions() as session:
+            organizer_id = await authenticate_organizer(session, x_api_key)
+        if organizer_id is None:
+            raise HTTPException(status_code=403, detail="invalid organizer key")
+        return organizer_id
+
     @app.middleware("http")
     async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
         rid = request.headers.get("X-Request-ID") or new_request_id()
         token = request_id.set(rid)
+        metrics_state["requests"] += 1
+        metrics_state["inflight"] += 1
         try:
             response = await call_next(request)
             response.headers["X-Request-ID"] = rid
             return response
         except Exception:
+            metrics_state["errors"] += 1
             return JSONResponse(
                 status_code=500,
                 content={"code": "internal_error", "request_id": rid},
             )
         finally:
+            metrics_state["inflight"] -= 1
             request_id.reset(token)
 
     class InventoryRequest(BaseModel):
@@ -59,6 +74,10 @@ def create_app() -> FastAPI:
 
     class HoldRequest(BaseModel):
         buyer_id: UUID
+        quantity: int = Field(gt=0)
+
+    class RefundRequest(BaseModel):
+        amount_minor: int = Field(gt=0)
         quantity: int = Field(gt=0)
 
     @app.post("/admin/events/{event_id}/inventory")
@@ -69,9 +88,10 @@ def create_app() -> FastAPI:
             async with session.begin():
                 await session.execute(
                     text(
-                        "INSERT INTO organizers(id,name,api_key_hash) VALUES (:id,'default','seed')"
+                        "INSERT INTO organizers(id,name,api_key_hash) "
+                        "VALUES (:id,'default',:key_hash)"
                     ),
-                    {"id": organizer_id},
+                    {"id": organizer_id, "key_hash": hash_api_key("development-admin")},
                 )
                 await session.execute(
                     text(
@@ -171,6 +191,22 @@ def create_app() -> FastAPI:
             "tickets": len(tickets),
         }
 
+    @app.post("/orders/{order_id}/refunds")
+    async def refund(order_id: UUID, payload: RefundRequest) -> dict[str, str]:
+        async with sessions() as session:
+            async with session.begin():
+                refund_id = await refund_order(
+                    session, order_id, payload.amount_minor, payload.quantity
+                )
+        return {"refund_id": str(refund_id), "order_id": str(order_id)}
+
+    @app.post("/tickets/{ticket_id}/scan")
+    async def scan(ticket_id: UUID, device_id: str = "online") -> dict[str, bool]:
+        async with sessions() as session:
+            async with session.begin():
+                accepted = await scan_ticket(session, ticket_id, device_id)
+        return {"accepted": accepted}
+
     @app.post("/webhooks/mock")
     async def mock_webhook(
         request: Request,
@@ -193,13 +229,17 @@ def create_app() -> FastAPI:
         return {"status": status}
 
     @app.get("/admin/dead-letters")
-    async def list_dead_letters_endpoint() -> list[dict[str, object]]:
+    async def list_dead_letters_endpoint(
+        _organizer_id: UUID = Depends(require_admin),
+    ) -> list[dict[str, object]]:
         async with sessions() as session:
             async with session.begin():
                 return await list_dead_letters(session)
 
     @app.get("/admin/dead-letters/{item_id}")
-    async def inspect_dead_letter(item_id: UUID) -> dict[str, object]:
+    async def inspect_dead_letter(
+        item_id: UUID, _organizer_id: UUID = Depends(require_admin)
+    ) -> dict[str, object]:
         async with sessions() as session:
             async with session.begin():
                 rows = await list_dead_letters(session, limit=1000)
@@ -209,7 +249,9 @@ def create_app() -> FastAPI:
         raise HTTPException(status_code=404, detail="dead letter not found")
 
     @app.post("/admin/dead-letters/{item_id}/replay")
-    async def replay_dead_letter_endpoint(item_id: UUID) -> dict[str, str]:
+    async def replay_dead_letter_endpoint(
+        item_id: UUID, _organizer_id: UUID = Depends(require_admin)
+    ) -> dict[str, str]:
         async with sessions() as session:
             async with session.begin():
                 if not await replay_dead_letter(session, item_id):
@@ -218,7 +260,9 @@ def create_app() -> FastAPI:
 
     @app.post("/admin/dead-letters/{item_id}/discard")
     async def discard_dead_letter_endpoint(
-        item_id: UUID, reason: str = "operator discard"
+        item_id: UUID,
+        reason: str = "operator discard",
+        _organizer_id: UUID = Depends(require_admin),
     ) -> dict[str, str]:
         async with sessions() as session:
             async with session.begin():
@@ -237,11 +281,28 @@ def create_app() -> FastAPI:
 
     @app.get("/readyz")
     async def readyz() -> dict[str, str]:
+        if not app.state.accepting:
+            raise HTTPException(status_code=503, detail="draining")
+        try:
+            async with sessions() as session:
+                await session.execute(text("SELECT 1"))
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="database unavailable") from exc
         return {"status": "ok"}
+
+    @app.on_event("shutdown")
+    async def graceful_shutdown() -> None:
+        app.state.accepting = False
 
     @app.get("/metrics")
     async def metrics() -> str:
-        return "# TYPE ticketing_up gauge\nticketing_up 1\n"
+        return (
+            "# TYPE ticketing_up gauge\n"
+            "ticketing_up 1\n"
+            f"ticketing_requests_total {metrics_state['requests']}\n"
+            f"ticketing_inflight {metrics_state['inflight']}\n"
+            f"ticketing_errors_total {metrics_state['errors']}\n"
+        )
 
     return app
 
