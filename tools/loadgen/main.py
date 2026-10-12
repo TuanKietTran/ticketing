@@ -63,6 +63,14 @@ async def buyer(
 ) -> float:
     started = time.perf_counter()
     async with gate:
+        await request_with_retries(
+            client,
+            "GET",
+            f"{base_url}/events/{event_id}",
+            f"browse-{buyer_id}",
+            endpoint="browse",
+            metrics=metrics,
+        )
         hold_key = str(uuid4())
         response = await request_with_retries(
             client,

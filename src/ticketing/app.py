@@ -1,4 +1,5 @@
 import asyncio
+import json
 import random
 import time
 from datetime import timedelta
@@ -14,6 +15,7 @@ from ticketing.api.idempotency import IdempotencyMiddleware
 from ticketing.auth import authenticate_organizer, hash_api_key
 from ticketing.clock import SystemClock
 from ticketing.db import make_engine, make_session_factory
+from ticketing.db.redis import make_redis
 from ticketing.deadletter import (
     discard_dead_letter,
     list_dead_letters,
@@ -44,6 +46,7 @@ def create_app() -> FastAPI:
     event_sections: dict[UUID, UUID] = {}
     webhook_events: set[str] = set()
     waiting_room = WaitingRoom()
+    redis = make_redis()
 
     async def require_admin(x_api_key: str = Header(..., alias="X-API-Key")) -> UUID:
         async with sessions() as session:
@@ -118,7 +121,38 @@ def create_app() -> FastAPI:
                 )
         event_sections[event_id] = section_id
         inventory.add_section(event_id, payload.capacity)
-        return {"event_id": str(event_id), "capacity": payload.capacity}
+        catalog = {
+            "event_id": str(event_id),
+            "capacity": payload.capacity,
+            "mode": "general_admission",
+        }
+        await redis.set(f"event:{event_id}:catalog", json.dumps(catalog), ex=300)
+        return catalog
+
+    @app.get("/events/{event_id}")
+    async def browse_event(event_id: UUID) -> dict[str, object]:
+        cached = await redis.get(f"event:{event_id}:catalog")
+        if cached:
+            return json.loads(cached)
+        async with sessions() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT e.id, s.capacity, s.mode FROM events e "
+                        "JOIN sections s ON s.event_id=e.id WHERE e.id=:event LIMIT 1"
+                    ),
+                    {"event": event_id},
+                )
+            ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="event not found")
+        catalog = {
+            "event_id": str(row["id"]),
+            "capacity": row["capacity"],
+            "mode": row["mode"],
+        }
+        await redis.set(f"event:{event_id}:catalog", json.dumps(catalog), ex=300)
+        return catalog
 
     @app.post("/events/{event_id}/holds", status_code=201)
     async def create_hold(
